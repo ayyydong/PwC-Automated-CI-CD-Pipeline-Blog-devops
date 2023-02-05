@@ -3,16 +3,16 @@
 
 steps:
 # Install
-- name: 'gcr.io/cloud-builders/npm'
-  args: ['install']
+- name: 'gcr.io/cloud-builders/yarn'
+  args: ['add', 'package.json']
   dir: './dummy-react-app'
 
 # Test
-- name: 'gcr.io/cloud-builders/npm'
-  args: ['run', 'test']
+- name: 'gcr.io/cloud-builders/yarn'
+  args: ['test']
   dir: './dummy-react-app'
 
 # Build
-- name: 'gcr.io/cloud-builders/npm'
-  args: ['run', 'build']
+- name: 'gcr.io/cloud-builders/yarn'
+  args: ['build']
   dir: './dummy-react-app'

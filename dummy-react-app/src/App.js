@@ -9,6 +9,9 @@ function App() {
         <p>
           Edit <code>src/App.js</code> and save to reload.
         </p>
+        <p>
+          Testing that a change has been deployed
+        </p>
         <a
           className="App-link"
           href="https://reactjs.org"
