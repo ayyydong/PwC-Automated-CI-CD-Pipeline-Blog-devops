@@ -10,7 +10,7 @@ function App() {
           Edit <code>src/App.js</code> and save to reload.
         </p>
         <p>
-          Testing that a change has been deployed
+          Testing environment variable: {process.env.REACT_APP_ENV_NAME}
         </p>
         <a
           className="App-link"
