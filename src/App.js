@@ -7,10 +7,13 @@ function App() {
       <header className="App-header">
         <img src={logo} className="App-logo" alt="logo" />
         <p>
-          Edit <code>src/App.js</code> and save to reload.
+          Build ID: {process.env.REACT_APP_BUILD_ID}
         </p>
         <p>
-          Testing environment variable: {process.env.REACT_APP_ENV_NAME}
+          Short Commit SHA: {process.env.REACT_APP_SHORT_SHA}
+        </p>
+        <p>
+          Testing environment variable: {process.env.REACT_APP_ENV}
         </p>
         <a
           className="App-link"
