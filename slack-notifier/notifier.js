@@ -17,13 +17,16 @@ const cloudbuild_status_color_map = {
 };
 
 // variables for parsing the logs to get test results
-const ONE_MEGABYTE = 1024*1024; // 1mb in bytes for reading the buffer, intentionally setting this size >> our log size
+const LOGS_START_INDICATOR = "starting build ";
+const BUILD_SUCCESS_END = "DONE";
+const BUILD_FAILURE_END = "ERROR";
 const TEST_SUITE_RESULTS_QUERY = 'Test Suites: ';
 const UNIT_TEST_RESULTS_QUERY = 'Tests: ';
 const TEST_COVERAGE_QUERY = 'All files';
 const COVERAGE_SEPARATOR = "|";
 const FAILING_TEST_CHAR = Buffer.from('4peP', 'base64').toString()
-const FAILING_TEST_SEPARATOR = "Step #2: ";
+const TEST_STEP_INDICATOR = "Step #2: ";
+const TEST_STEP_END = "Step #3: ";
 const NEWLINE_CHAR = "\n";
 const TEST_RESULTS_ERROR_MSG = "Tests did not run or results are unavailable";
 const TEST_COVERAGE_ERROR_MSG = "Coverage did not run or results are unavailable";
@@ -35,19 +38,32 @@ let test_results;
 let coverage_results;
 let error_results;
 
+// variables to hold output of current build's logs
+let current_build_logs = "";
+let logs_start_query;
+let logs_end_query;
+let current_build_flag = false; // true when the logStream contains the current build
+let logs_start_index;
+let logs_end_index;
+
+let build;
+
 // subscribe is the main function called by Cloud Functions.
 module.exports.subscribe = pubsubMessage  => {
-    const build = eventToBuild(pubsubMessage.data);
+    build = eventToBuild(pubsubMessage.data);
 
     if (Object.keys(cloudbuild_status_color_map).indexOf(build.status) === -1) return; // We don't care about this status
 
+    logs_start_query = LOGS_START_INDICATOR + "\"" + build.id + "\"";
+    logs_end_query = build.status === "SUCCESS" ? BUILD_SUCCESS_END : BUILD_FAILURE_END;
+
     logsReadStream = storage.bucket(build.logsBucket).file('log-' + build.id + '.txt').createReadStream();
-    logsReadStream.on('readable', parseTestResults);
+    logsReadStream.on('readable', getCurrentBuildLogs);
     logsReadStream.on('end', () => {
-        // Send message to Slack.
-        const message = createSlackMessage(build);
+        let test_step_logs = getTestStepLogs();
+        parseTestResults(test_step_logs);
         (async () => {
-            await webhook.send(message);
+            await webhook.send(createSlackMessage());
         })();
     })
 };
@@ -58,33 +74,55 @@ const eventToBuild = (data) => {
 };
 
 // parse out test results from logs
-const parseTestResults = () => {
+const getCurrentBuildLogs = () => {
     let logs;
-    let breakpoint;
     
     // Use a loop to make sure we read all currently available data from logsReadStream
-    while (null !== (logs = logsReadStream.read(ONE_MEGABYTE))) {
+    while (null !== (logs = logsReadStream.read())) {
       logs = Buffer.from(logs, 'base64').toString();
+
+      logs_start_index = current_build_flag ? 0 : logs.indexOf(logs_start_query);
+
+      if (logs_start_index === -1) {
+        continue;
+      } else {
+        current_build_flag = true;
+      }
       
-      // parse out test results
-      let test_suite_results_index = logs.indexOf(TEST_SUITE_RESULTS_QUERY);
-      breakpoint = logs.indexOf(NEWLINE_CHAR, position=test_suite_results_index);
-      let test_suite_results = logs.slice(test_suite_results_index, breakpoint);
+      logs_end_index = logs.indexOf(logs_end_query, position=logs_start_index)
+      if (logs_end_index !== -1) current_build_flag = false;
 
-      let unit_test_results_index = logs.indexOf(UNIT_TEST_RESULTS_QUERY);
-      breakpoint = logs.indexOf(NEWLINE_CHAR, position=unit_test_results_index);
-      let unit_test_results = logs.slice(unit_test_results_index, breakpoint);
-      test_results = formatTestResults(test_suite_results, unit_test_results);
-
-      // parse out coverage results
-      let test_coverage_index = logs.indexOf(TEST_COVERAGE_QUERY);
-      breakpoint = logs.indexOf(NEWLINE_CHAR, position=test_coverage_index);
-      let unformatted_coverage_results = logs.slice(test_coverage_index, breakpoint);
-      coverage_results = formatCoverageResults(unformatted_coverage_results);
-
-      // parse out any error messages from tests
-      error_results = formatFailingTestMessages(logs);
+      current_build_logs += logs.slice(logs_start_index, logs_end_index);
     }
+}
+
+const getTestStepLogs = () => {
+    const test_step_start_index = current_build_logs.indexOf(TEST_STEP_INDICATOR);
+    const test_step_end_index = current_build_logs.indexOf(TEST_STEP_END);
+    return current_build_logs.slice(test_step_start_index, test_step_end_index);
+  }
+
+const parseTestResults = logs => {
+    let breakpoint;
+
+    // parse out test results
+    let test_suite_results_index = logs.indexOf(TEST_SUITE_RESULTS_QUERY);
+    breakpoint = logs.indexOf(NEWLINE_CHAR, position=test_suite_results_index);
+    let test_suite_results = logs.slice(test_suite_results_index, breakpoint);
+
+    let unit_test_results_index = logs.indexOf(UNIT_TEST_RESULTS_QUERY);
+    breakpoint = logs.indexOf(NEWLINE_CHAR, position=unit_test_results_index);
+    let unit_test_results = logs.slice(unit_test_results_index, breakpoint);
+    test_results = formatTestResults(test_suite_results, unit_test_results);
+
+    // parse out coverage results
+    let test_coverage_index = logs.indexOf(TEST_COVERAGE_QUERY);
+    breakpoint = logs.indexOf(NEWLINE_CHAR, position=test_coverage_index);
+    let unformatted_coverage_results = logs.slice(test_coverage_index, breakpoint);
+    coverage_results = formatCoverageResults(unformatted_coverage_results);
+
+    // parse out any error messages from tests
+    error_results = formatFailingTestMessages(logs);
 }
 
 const formatTestResults = (test_suite_results, unit_test_results) => {
@@ -120,7 +158,7 @@ const formatFailingTestMessages = logs => {
       breakpoint = logs.indexOf(NEWLINE_CHAR, position=breakpoint + 1);
       breakpoint = logs.indexOf(NEWLINE_CHAR, position=breakpoint + 1);
   
-      curr_error_message = logs.slice(failing_test_char_index, breakpoint).split(FAILING_TEST_SEPARATOR);
+      curr_error_message = logs.slice(failing_test_char_index, breakpoint).split(TEST_STEP_INDICATOR);
       results += curr_error_message[0] + curr_error_message[2] + NEWLINE_CHAR;
     }
   
@@ -128,7 +166,7 @@ const formatFailingTestMessages = logs => {
   }
 
 // createSlackMessage create a message from a build object.
-const createSlackMessage = build => {
+const createSlackMessage = () => {
     let buildId = build.id;
     let buildCommit = build.substitutions.COMMIT_SHA;
     let branch = build.substitutions.BRANCH_NAME;
