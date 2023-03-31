@@ -17,9 +17,6 @@ const cloudbuild_status_color_map = {
 };
 
 // variables for parsing the logs to get test results
-const LOGS_START_INDICATOR = "starting build ";
-const BUILD_SUCCESS_END = "DONE";
-const BUILD_FAILURE_END = "ERROR";
 const TEST_SUITE_RESULTS_QUERY = 'Test Suites: ';
 const UNIT_TEST_RESULTS_QUERY = 'Tests: ';
 const TEST_COVERAGE_QUERY = 'All files';
@@ -32,38 +29,27 @@ const TEST_RESULTS_ERROR_MSG = "Tests did not run or results are unavailable";
 const TEST_COVERAGE_ERROR_MSG = "Coverage did not run or results are unavailable";
 const NO_FAILING_TEST_MESSAGE = "No failing tests detected";
 
-// variables to hold output of test results
-let logsReadStream;
-let test_results;
-let coverage_results;
-let error_results;
-
-// variables to hold output of current build's logs
-let current_build_logs = "";
-let logs_start_query;
-let logs_end_query;
-let current_build_flag = false; // true when the logStream contains the current build
-let logs_start_index;
-let logs_end_index;
-
-let build;
-
 // subscribe is the main function called by Cloud Functions.
 module.exports.subscribe = pubsubMessage  => {
-    build = eventToBuild(pubsubMessage.data);
+    const build = eventToBuild(pubsubMessage.data);
 
     if (Object.keys(cloudbuild_status_color_map).indexOf(build.status) === -1) return; // We don't care about this status
 
-    logs_start_query = LOGS_START_INDICATOR + "\"" + build.id + "\"";
-    logs_end_query = build.status === "SUCCESS" ? BUILD_SUCCESS_END : BUILD_FAILURE_END;
+    let current_build_logs = "";
 
-    logsReadStream = storage.bucket(build.logsBucket).file('log-' + build.id + '.txt').createReadStream();
-    logsReadStream.on('readable', getCurrentBuildLogs);
+    const logsReadStream = storage.bucket(build.logsBucket).file('log-' + build.id + '.txt').createReadStream();
+    
+    logsReadStream.on('readable', () => {
+        current_build_logs += getCurrentBuildLogs(logsReadStream);
+    });
+
     logsReadStream.on('end', () => {
-        let test_step_logs = getTestStepLogs();
-        parseTestResults(test_step_logs);
+        const test_step_logs = getTestStepLogs(current_build_logs);
+        const test_summary = parseTestResults(test_step_logs);
+        // Send message to Slack.
+        const message = createSlackMessage(build, test_summary);
         (async () => {
-            await webhook.send(createSlackMessage());
+            await webhook.send(message);
         })();
     })
 };
@@ -74,65 +60,62 @@ const eventToBuild = (data) => {
 };
 
 // parse out test results from logs
-const getCurrentBuildLogs = () => {
+const getCurrentBuildLogs = logsReadStream => {
     let logs;
+    let current_build_logs = "";
     
-    // Use a loop to make sure we read all currently available data from logsReadStream
+    // Use a loop to make sure we read all currently available data
     while (null !== (logs = logsReadStream.read())) {
-      logs = Buffer.from(logs, 'base64').toString();
-
-      logs_start_index = current_build_flag ? 0 : logs.indexOf(logs_start_query);
-
-      if (logs_start_index === -1) {
-        continue;
-      } else {
-        current_build_flag = true;
-      }
-      
-      logs_end_index = logs.indexOf(logs_end_query, position=logs_start_index)
-      if (logs_end_index !== -1) current_build_flag = false;
-
-      current_build_logs += logs.slice(logs_start_index, logs_end_index);
+      current_build_logs += Buffer.from(logs, 'base64').toString();
     }
-}
+  
+    return current_build_logs;
+  }
 
-const getTestStepLogs = () => {
+const getTestStepLogs = current_build_logs => {
     const test_step_start_index = current_build_logs.indexOf(TEST_STEP_INDICATOR);
     const test_step_end_index = current_build_logs.indexOf(TEST_STEP_END);
     return current_build_logs.slice(test_step_start_index, test_step_end_index);
-  }
+}
 
 const parseTestResults = logs => {
     let breakpoint;
 
     // parse out test results
-    let test_suite_results_index = logs.indexOf(TEST_SUITE_RESULTS_QUERY);
+    const test_suite_results_index = logs.indexOf(TEST_SUITE_RESULTS_QUERY);
     breakpoint = logs.indexOf(NEWLINE_CHAR, position=test_suite_results_index);
-    let test_suite_results = logs.slice(test_suite_results_index, breakpoint);
-
-    let unit_test_results_index = logs.indexOf(UNIT_TEST_RESULTS_QUERY);
+    const test_suite_results = logs.slice(test_suite_results_index, breakpoint);
+  
+    const unit_test_results_index = logs.indexOf(UNIT_TEST_RESULTS_QUERY);
     breakpoint = logs.indexOf(NEWLINE_CHAR, position=unit_test_results_index);
-    let unit_test_results = logs.slice(unit_test_results_index, breakpoint);
-    test_results = formatTestResults(test_suite_results, unit_test_results);
+    const unit_test_results = logs.slice(unit_test_results_index, breakpoint);
+    
+    const test_results = formatTestResults(test_suite_results, unit_test_results);
 
     // parse out coverage results
-    let test_coverage_index = logs.indexOf(TEST_COVERAGE_QUERY);
+    const test_coverage_index = logs.indexOf(TEST_COVERAGE_QUERY);
     breakpoint = logs.indexOf(NEWLINE_CHAR, position=test_coverage_index);
-    let unformatted_coverage_results = logs.slice(test_coverage_index, breakpoint);
-    coverage_results = formatCoverageResults(unformatted_coverage_results);
+    const unformatted_coverage_results = logs.slice(test_coverage_index, breakpoint);
+    const coverage_results = formatCoverageResults(unformatted_coverage_results);
 
     // parse out any error messages from tests
-    error_results = formatFailingTestMessages(logs);
+    const error_results = formatFailingTestMessages(logs);
+  
+    const test_summary = {
+      test_results: test_results,
+      coverage_results: coverage_results,
+      error_results: error_results
+    };
+  
+    return test_summary;
 }
 
 const formatTestResults = (test_suite_results, unit_test_results) => {
-    if ((test_results !== undefined) && (test_results !== TEST_RESULTS_ERROR_MSG)) return test_results;
     if (test_suite_results === '' || unit_test_results === '') return TEST_RESULTS_ERROR_MSG;
     return test_suite_results + NEWLINE_CHAR + unit_test_results;
 }
 
 const formatCoverageResults = unformatted_coverage_results => {
-    if ((coverage_results !== undefined) && (coverage_results !== TEST_COVERAGE_ERROR_MSG)) return coverage_results;
     if (unformatted_coverage_results === '') return TEST_COVERAGE_ERROR_MSG;
     
     const coverage_results_array = unformatted_coverage_results.split(COVERAGE_SEPARATOR);
@@ -145,8 +128,6 @@ const formatCoverageResults = unformatted_coverage_results => {
 }
 
 const formatFailingTestMessages = logs => {
-    if ((error_results !== undefined) && (error_results !== NO_FAILING_TEST_MESSAGE)) return error_results;
-
     let breakpoint = 0;
     let failing_test_char_index;
     let curr_error_message;
@@ -166,7 +147,7 @@ const formatFailingTestMessages = logs => {
   }
 
 // createSlackMessage create a message from a build object.
-const createSlackMessage = () => {
+const createSlackMessage = (build, test_summary) => {
     let buildId = build.id;
     let buildCommit = build.substitutions.COMMIT_SHA;
     let branch = build.substitutions.BRANCH_NAME;
@@ -187,15 +168,15 @@ const createSlackMessage = () => {
                     },
                     {
                         title: 'Test results',
-                        value: test_results,
+                        value: test_summary.test_results,
                     },
                     {
                         title: 'Coverage results',
-                        value: coverage_results,
+                        value: test_summary.coverage_results,
                     },
                     {
                         title: 'Test error messages',
-                        value: error_results,
+                        value: test_summary.error_results,
                     },
                     {
                         title: 'Repository',
