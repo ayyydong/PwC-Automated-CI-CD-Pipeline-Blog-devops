@@ -8,7 +8,7 @@ terraform {
 }
 
 provider "google" {
-  credentials = file("./gcp_keys/9ds_devops_terraform_key.json")
+  credentials = file("./gcp_keys/devops_tf_key.json")
   project     = var.devops_project_id
   alias       = "devops"
 }
